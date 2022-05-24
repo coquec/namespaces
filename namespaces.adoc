@@ -1,0 +1,697 @@
+= namespaces
+:tags: Publish
+:author: José Couto
+:date: may 2022
+:revdate: 20220504
+:source-highlighter: rouge
+:toc:
+:toc-title: Índice
+:toclevels: 3
+:numbered:
+:appendix-caption: Apéndice
+:figure-caption: Figura
+:table-caption: Tabla
+:description: Notas sobre namespaces. \
+Puede usarse según los términos de la licencia GPLv3.
+
+== namespaces
+
+Los _namespaces_ son una abstracción de Linux sobre distintos tipos de recursos
+globales para dar la impresión de que tienen sus propias instancias de ellos a
+los procesos miembros del namespace, siendo invisibles para otros procesos.  Se
+usan principalmente para implantar contenedores, y systemd también los utiliza
+para aislar los recursos usados por algunos de sus procesos principales, como
+`systemd-logind` y `systemd-timesyncd`.  Los namespaces disponibles son los
+siguientes:
+
+* *UTS NS*, que proporcionan su propio nombre de host y su propio nombre de
+   dominio NIS a los procesos.  UTS viene de _UNIX Time-sharing System_.
+
+* *Mount NS*, que aíslan los puntos de montajes, de forma que los procesos
+  tengan una percepción propia de la jerarquía de archivos, y que los montajes
+  y desmontajes que hagan no afecten al resto del sistema, excepto para los
+  sistemas de archivos que se marquen explícitamente como compartidos.
+
+* *PID NS*, que proporcionan un conjunto propio de números de proceso.
+
+* *User NS*, que proporcionan un conjunto propio de identificadores de
+  usuarios, de grupos y de capacidades a los procesos.
+
+* *Network NS*, que aíslan la infraestructura de red.  Los procesos tendrán
+  stacks independientes de IPv4 e IPv6, incluyendo direcciones IP y números de
+  puertos propios, sus propias tablas de rutas y reglas de filtrado, sus
+  propias estructuras `/proc/net` y `/sys/class/net`, sus propios sockets, etc.
+
+* *cgroup NS*, que proporcionan a los procesos una raíz propia de los cgroups.
+
+* *IPC NS*, que proporciona a los procesos sus propias colas de mensajería
+  POSIX -ver `man mq_overview(7)`- y System V -ver `sysvipc(7)`-, sus propios
+  conjuntos de semáforos y de segmentos de memoria compartida.
+
+* *Time NS*, que proporciona una visión propia de la hora actual y del momento
+  del arranque a los procesos.
+
+Para cada tipo de namespace, puede haber varias instancias.  Al arrancar el
+sistema, solo hay una instancia de cada tipo, la _initial instance_.  En
+general, cuando se habla de un namespace nos referimos a una instancia de un
+namespace.
+
+Cada proceso es miembro de una sola instancia de cada tipo de namespace, que
+pueden verse en la carpeta `/proc/__<PID>__/ns`:
+
+[source,console]
+----
+# ls -l /proc/1/ns
+lrwxrwxrwx 1 root root 0 may  6 13:25 cgroup -> 'cgroup:[4026531835]'
+lrwxrwxrwx 1 root root 0 may  9 10:24 ipc -> 'ipc:[4026531839]'
+lrwxrwxrwx 1 root root 0 may  9 10:24 mnt -> 'mnt:[4026531841]'
+lrwxrwxrwx 1 root root 0 may  9 10:24 net -> 'net:[4026531840]'
+lrwxrwxrwx 1 root root 0 may  9 10:24 pid -> 'pid:[4026531836]'
+lrwxrwxrwx 1 root root 0 may  9 10:24 pid_for_children -> 'pid:[4026531836]'
+lrwxrwxrwx 1 root root 0 may  9 10:24 time -> 'time:[4026531834]'
+lrwxrwxrwx 1 root root 0 may  9 10:24 time_for_children -> 'time:[4026531834]'
+lrwxrwxrwx 1 root root 0 may  9 10:24 user -> 'user:[4026531837]'
+lrwxrwxrwx 1 root root 0 may  9 10:24 uts -> 'uts:[4026531838]'
+----
+
+Las instancias de los namespaces existirán mientras haya algún proceso en ellas
+o si se hace un _bind mount_ de esos enlaces simbólicos en otra parte del
+sistema de archivos:
+
+[source,console]
+----
+# readlink /proc/1/ns/uts
+uts:[4026531838]
+# touch /tmp/uts
+# readlink /proc/494219/ns/uts # Miramos el qué UTS NS está otro proceso aislado del sistema
+uts:[4026532611]
+# mount --bind /proc/494219/ns/uts /tmp/uts # Hacemos el bind mount
+# ls -l /tmp/uts
+-r--r--r-- 1 root root 0 may  9 13:05 /tmp/uts
+# mount | grep uts
+nsfs on /tmp/uts type nsfs (rw)
+# sleep 20 # Esperamos a que termine el proceso 494219
+# nsenter --uts=/tmp/uts bash
+# ls -l /proc/$$/ns/uts # El UTS NS coincide con el del proceso original
+lrwxrwxrwx 1 root root 0 may  9 13:15 /proc/495357/ns/uts -> 'uts:[4026532611]'
+# exit
+exit
+# umount /tmp/uts
+----
+
+=== Llamadas al sistema
+
+Podemos utilizar las siguientes llamadas al sistema para gestionar la
+pertenencia a namespaces y la creación de instancias.  *Es necesario tener los
+privilegios adecuados (`CAP_SYS_ADMIN`) para crear la mayoría de los
+namespaces*, salvo los user namespaces:
+
+* `clone(2)`, que crea un proceso hijo en nuevos namespaces.
+
+* `setns(2)`, que permite unirse a un namespace al proceso que ejecuta la
+  llamada, salvo para los PID NS, que afecta a los procesos que deriven del que
+  hace la llamada.
+
+* `unshare(2)`, que permite crear nuevas instancias de namespaces y meter en
+  ellas al proceso que ejecuta la llamada, salvo para los PID NS, que afecta a
+  los procesos que deriven del que hace la llamada.
+
+También se puede utilizar la llamada a `ioctl(2)` para obtener información
+sobre los namespaces.
+
+=== CLI
+
+Tenemos varias órdenes para gestionar los namespaces:
+
+* `lsns(1)` para listar los namespaces del sistema.  Se puede usar la opción
+  `-t` para especificar un tipo concreto.
+
+* `unshare(1)` para crear namespaces y ejecutar un programa en ellos.
+
+* `nsenter(1)` para ejecutar un programa en namespaces ya existentes.
+
+Parece que se puede usar `nsenter` para entrar al contexto de un contenedor
+Docker de forma muy parecida a lo que hace `docker exec -it`.  Por ejemplo:
+
+[source,console]
+----
+# docker ps
+CONTAINER ID   IMAGE              COMMAND                  CREATED       STATUS       PORTS                  NAMES
+17c56ecebd85   wordpress:latest   "docker-entrypoint.s…"   2 weeks ago   Up 12 days   0.0.0.0:8080->80/tcp   wp
+ace8361dcf3d   mysql:latest       "docker-entrypoint.s…"   2 weeks ago   Up 12 days   3306/tcp, 33060/tcp    db
+
+# docker inspect wp | grep -i pid
+            "Pid": 1832,
+            "PidMode": "",
+            "PidsLimit": null,
+
+# nsenter --all --target 1832 bash
+root@17c56ecebd85:/# ps -ef
+UID          PID    PPID  C STIME TTY          TIME CMD
+root           1       0  0 Apr21 ?        00:00:03 apache2 -DFOREGROUND
+www-data      19       1  0 Apr21 ?        00:00:00 apache2 -DFOREGROUND
+www-data      20       1  0 Apr21 ?        00:00:00 apache2 -DFOREGROUND
+www-data      22       1  0 Apr21 ?        00:00:00 apache2 -DFOREGROUND
+www-data      25       1  0 Apr21 ?        00:00:00 apache2 -DFOREGROUND
+www-data      28       1  0 Apr21 ?        00:00:00 apache2 -DFOREGROUND
+www-data      29       1  0 Apr21 ?        00:00:00 apache2 -DFOREGROUND
+www-data      30       1  0 Apr21 ?        00:00:00 apache2 -DFOREGROUND
+www-data      31       1  0 Apr21 ?        00:00:00 apache2 -DFOREGROUND
+www-data      33       1  0 Apr21 ?        00:00:00 apache2 -DFOREGROUND
+www-data      36       1  0 Apr21 ?        00:00:00 apache2 -DFOREGROUND
+root          48       0  0 11:03 ?        00:00:00 bash
+root          49      48  0 11:03 ?        00:00:00 ps -ef
+----
+
+== Detalle de los namespaces
+
+=== UTS namespace
+
+Este espacio de nombres sirve para proporcionar un hostname y dominio NIS
+propios a los procesos asociados:
+
+[source,console]
+----
+$ hostname && domainname
+host
+(none)
+
+$ sudo unshare --uts bash --norc # Lanzamos un bash con su propio namespace UTS
+# hostname && domainname # Se heredan los parámetros del proceso padre
+host
+(none)
+# hostname paco
+# domainname currupipi
+# hostname && domainname
+paco
+currupipi
+# exit # Terminamos el proceso, lo que elimina el namespace por ser el último
+exit
+
+$ hostname && domainname  # No hay cambios en el host
+host
+(none)
+----
+
+=== Mount namespaces
+
+Este tipo de namespace proporciona a los procesos asociados un listado aislado
+de los puntos de montaje del sistema, por lo que los procesos pueden tener su
+propia jerarquía de directorios y un contenido propio en los pseudoarchivos
+`mounts`, `mountinfo` y `mountstats` de `/proc/[pid]`.
+
+Una cosa que hay que conocer al tratar este tipo de namespaces son los _bind
+mount_.  El kernel de Linux permite montar archivos o carpetas en otras partes
+del sistema operativo _o sobre sí mismos_, lo que hace que aparezcan en el
+árbol de montajes de los procesos:
+
+[source,console]
+----
+# cd /tmp
+# mkdir t
+# mount | grep tmp/t
+# mount --bind t t
+# mount | grep tmp/t
+/dev/mapper/blas--vg-root on /tmp/t type ext4 (rw,noatime,nodiratime,errors=remount-ro)
+----
+
+Esto es importante porque nos permite utilizar estas carpetas como puntos de
+montaje en las llamadas al sistema, por ejemplo a `pivot_root(2)`.
+
+Las siguientes órdenes se ejecutan en dos terminales distintas, una con el
+prompt ``host\$ `` y otra con el prompt ``ns\$ ``, dentro del namespace.
+
+[source,console]
+----
+host$ cd /tmp
+host$ mkdir t
+host$ sudo mount -t tmpfs none t
+host$ mkdir t/{1,2}
+host$ SUDO_PS1='ns\$ ' sudo unshare --mount bash --norc # shell en un nuevo mount namespace.
+ns# pwd
+/tmp
+ns# findmnt -aR t
+TARGET SOURCE FSTYPE OPTIONS
+/tmp/t none   tmpfs  rw,relatime,inode64
+ns# mount -t tmpfs none t/2     # En el namespace, montamos un nuevo fs en t/2.
+ns# findmnt -aR t
+TARGET     SOURCE FSTYPE OPTIONS
+/tmp/t     none   tmpfs  rw,relatime,inode64
+`-/tmp/t/2 none   tmpfs  rw,relatime,inode64
+
+host$ findmnt -aR /tmp/t        # El montaje hecho en el ns no aparece en el host.
+TARGET SOURCE FSTYPE OPTIONS
+/tmp/t none   tmpfs  rw,relatime,inode64
+host$ sudo mount -t tmpfs none /tmp/t/1
+host$ findmnt -aR /tmp/t
+TARGET     SOURCE FSTYPE OPTIONS
+/tmp/t     none   tmpfs  rw,relatime,inode64
+`-/tmp/t/1 none   tmpfs  rw,relatime,inode64
+
+ns# findmnt -aR t               # El montaje hecho en el host no aparece en el ns.
+TARGET     SOURCE FSTYPE OPTIONS
+/tmp/t     none   tmpfs  rw,relatime,inode64
+`-/tmp/t/2 none   tmpfs  rw,relatime,inode64
+ns# exit
+exit
+
+host$ sudo umount /tmp/t/1
+host$ sudo umount /tmp/t
+host$ rmdir /tmp/t
+----
+
+Los puntos de montaje se pueden marcar como `MS_SHARED` para indicar que todos
+los procesos que vean el punto de montaje podrán ver su contenido y otros
+montajes que se hagan dentro de él.  Esto se puede hacer con la llamada a
+`mount(2)` o con `mount --make-shared`.  También se pueden marcar como
+`MS_PRIVATE` para indicar lo contrario, que los montajes hechos dentro de él no
+se podrán ver en otros procesos.
+
+Se puede ver información sobre el mount NS de un proceso, incluyendo los flags
+de los puntos de montaje, mirando el pseudoarchivo `/proc/<PID>/mountinfo`:
+
+[source,console]
+----
+$ grep proc /proc/self/mountinfo
+23 29 0:21 / /proc rw,nosuid,nodev,noexec,relatime shared:12 - proc proc rw
+36 23 0:31 / /proc/sys/fs/binfmt_misc rw,relatime shared:13 - autofs systemd-1 rw,fd=29,pgrp=1,timeout=0,minproto=5,maxproto=5,direct,pipe_ino=13113
+94 36 0:36 / /proc/sys/fs/binfmt_misc rw,nosuid,nodev,noexec,relatime shared:47 - binfmt_misc binfmt_misc rw
+----
+
+
+=== PID namespaces
+
+Los PID namespaces proporcionan un espacio de PID único para los procesos.  Los
+PID namespaces forman una jerarquía, y los procesos solo pueden ver otros
+procesos que se encuentren en su instancia de PID NS o en los descendientes
+dentro de esa jerarquía, con PID distintos a los que ven esos procesos por
+estar en sus propios PID NS (cada proceso tendrá un PID distinto en cada punto
+del camino de la jerarquía que va desde su NS hasta el raíz).
+
+El primer proceso asignado a un PID namespace tendrá el PID 1, y al resto de
+procesos que se lancen en él se les irá asignando PID secuenciales.  Como
+ocurre con el init del host, para evitar que los procesos descendientes puedan
+matarlo por error, este proceso ignorará todas las señales para los que no haya
+establecido explícitamente un manejador, salvo `SIGSTOP` y `SIGKILL`.  Si el
+proceso con PID 1 muere, se matarán todos los procesos del namespace con una
+señal `SIGKILL`, y se destruirá el namespace a menos que se mantenga abierto el
+pseudoarchivo `/proc/__PID__/ns/pid` en el host o haya un _bind mount_ de él.
+
+Si utilizamos `unshare` para lanzar un proceso nuevo, nos podemos encontrar
+problemas:
+
+[source,console]
+----
+# unshare --pid /bin/bash
+blas:~# echo $$
+966021
+blas:~# cat /proc/$$/cmdline
+bash: fork: Cannot allocate memory
+----
+
+En este caso, `bash` no tiene PID 1 porque, con las opciones que le hemos
+pasado, `unshare` ejecuta dos llamadas al sistema:
+
+[source]
+----
+974301 unshare(CLONE_NEWPID)            = 0
+974301 execve("/bin/bash", ["/bin/bash"], 0x7ffc016380c8 /* 24 vars */) = 0
+----
+
+La primera llamada crea un nuevo espacio de nombres, y la segunda _ejecuta
+`bash` sustituyendo al proceso con el que se está ejecutando `unshare`_, que
+sigue en el namespace padre del que hemos creado con la primera llamada.  Esto
+es de la página de manual de `unshare(2)`, relativo a `CLONE_NEWPID`:
+
+_The calling process is not moved into the new namespace.  The first child
+created by the calling process will have the process ID 1 and will assume the
+role of init(1) in the new namespace._
+
+Cuando `bash` se ejecuta, lanza otro proceso para inicializarse que sí que
+asume el PID 1 en el namespace.  Cuando termina, el namespace se queda sin
+proceso con PID 1, lo que no sigue las normas de Linux, ya que ese proceso es
+necesario para hacerse padre de los procesos que se queden huérfanos, por lo
+que el kernel desactiva la capacidad de lanzar nuevos procesos en el namespace
+y devuelve un error `-ENOMEM` cuando `bash` intenta crear nuevos procesos.
+
+Para poder lanzar un proceso con su propio PID NS con `unshare`, hay que
+hacerlo así:
+
+[source,console]
+----
+# unshare --pid --fork --mount-proc /bin/bash
+blas:~# echo $$
+1
+----
+
+Con esto, pedimos a `unshare` que haga `fork` para lanzar `bash` dentro de un
+nuevo proceso, que también cree un mount NS (la opción `--mount` se activa
+implícitamente al usar `--mount-proc`), y monte su propio sistema de archivos
+`proc` en `/proc` en modo `MS_PRIVATE` para que el montaje no se propague a
+otros procesos del grupo.
+
+Los procesos lanzados dentro de un PID NS tendrán distintos PID en la jerarquía
+de namespaces.  Podemos verlos en el campo `NSpid` del pseudoarchivo
+`/proc/<PID>/status`, que los mostrará desde el PID NS en el que estemos en ese
+momento:
+
+[source,console]
+----
+# unshare --pid --fork --mount-proc -- unshare --pid --fork --mount-proc -- /bin/sleep 120
+^Z
+zsh: suspended  unshare --pid --fork --mount-proc -- unshare --pid --fork --mount-proc --  12
+# ps -ef | grep sleep
+root     1081838  901012  0 10:32 pts/5    00:00:00 unshare --pid --fork --mount-proc -- unshare --pid --fork --mount-proc -- /bin/sleep 120
+root     1081839 1081838  0 10:32 pts/5    00:00:00 unshare --pid --fork --mount-proc -- /bin/sleep 120
+root     1081840 1081839  0 10:32 pts/5    00:00:00 /bin/sleep 120
+root     1082041  901012  0 10:33 pts/5    00:00:00 grep sleep
+# grep NSpid /proc/1081840/status
+NSpid:  1081840 2       1
+----
+
+En la salida anterior aparecen tres PID: 1081840 es el PID del proceso `sleep`
+en el namespace original, 2 en el creado por el primer `unshare` (el 1 es el
+del `unshare` que lanzamos), y 1 en el creado por el segundo.
+
+=== User namespaces
+
+Los user namespaces permiten que los UID y GID del host aparezcan con valores
+distintos en los procesos del namespace, así como aislar otros recursos del
+kernel asociados a ellos (directorio home, `keyrings(7)` y las
+`capabilities(7)`).  Por ejemplo, se puede hacer que el UID 1000 del host se
+corresponda al UID 0 dentro del namespace, por lo que el proceso se ejecutará
+en él como root.
+
+No es necesario tener permisos de root para crear un user NS.  El primer
+proceso asignado al namespace tiene todas las capacidades (_capabilities_) del
+kernel dentro del namespace *sin importar las que tuviera el proceso que lo
+creó*, pero ninguna fuera, incluso aunque el namespace lo cree root.
+
+Los user NS forman una jerarquía, teniendo cada uno de ellos un padre y,
+opcionalmente, hijos.
+
+La correspondencia entre UID se puede configurar escribiendo en
+`/proc/__<PID>__/uid_map`, y la de GID en `/proc/__<PID>__/gid_map`.  Solo root
+o el usuario que creó el namespace pueden escribir en ellos y solo se permite
+escribir *una vez* en ellos para definir las correspondencias, aunque el
+contenido puede tener varias líneas.  Tienen este formato:
+
+[source,console]
+----
+ID-dentro-ns    ID-fuera-ns     cantidad
+----
+
+Esto hace corresponder la `cantidad` de identificadores del namespace empezando
+en `ID-dentro-ns` con los que empiezan en `ID-fuera-ns` en el namespace del
+proceso que escribe en el archivo.  Si los dos procesos estuvieran en el mismo
+namespace, `ID-fuera-ns` se referiría al user namespace padre de los dos.
+
+NOTE: El proceso que quiera escribir en `gid_map` no debe tener la capacidad de
+modificar sus grupos, lo que se puede conseguir con `echo deny >
+/proc/__<PID>__/setgroups`.  Esto se hace para impedir que un usuario del grupo
+`denygroup` gane permisos con `setgroups(2)` sobre archivos con permisos
+`u=rw,g=,o=r` y propietario `xxx:denygroup`.
+
+Todos los UID de un sistema de archivos para los que no haya correspondencia en
+un user NS se traducen en el namespace al valor definido en
+`/proc/sys/kernel/overflowuid` (usuario `nobody`).  Con los GID pasa lo mismo,
+traduciéndose dentro del namespace al valor definido en
+`/proc/sys/kernel/overflowgid` (grupo `nogroup`).
+
+Cuando un proceso en un user NS intenta utilizar recursos globales del sistema
+(p. ej, leer un archivo), se traduce sus UID y GID antes de comprobar los
+permisos.  Esto implica que un proceso que se esté ejecutando como root en el
+namespace solo tendrá acceso a los recursos globales que le permitan los UID y
+GID globales:
+
+[source,console]
+----
+host$ id
+uid=1000(blas) gid=1000(blas) groups=1000(blas)
+host$ unshare -U bash
+
+ns$ echo $$
+187067
+ns$ id
+uid=65534(nobody) gid=65534(nogroup) groups=65534(nogroup)
+ns$ ls -ld /root
+drwx------ 31 nobody nogroup 4096 may 20 09:46 /root
+ns$ $ ls -l /root
+ls: cannot open directory '/root': Permission denied
+
+host$ echo '0 1000 1' > /proc/187067/uid_map
+
+ns$ id
+uid=0(root) gid=65534(nogroup) groups=65534(nogroup)
+ns$ ls -l /root
+ls: cannot open directory '/root': Permission denied
+----
+
+=== Network namespaces
+
+Estos namespaces sirven para proporcionar una visión propia a los procesos de
+todo un stack de red: dispositivos, direcciones de nivel 2 y tres, puertos,
+rutas, reglas de cortafuegos...
+
+Los network NS pueden manipularse con la orden `ip netns`.
+
+Se puede crear un network NS con `ip netns add <nombre>`, que además hará un
+_bind mount_ de él en `/run/netns/<nombre>` para mantenerlo vivo aunque no haya
+procesos asociados a él.  El descriptor de ese archivo puede pasarse a llamadas
+del sistema que necesiten una referencia a un network NS, como `setns(2)`.
+
+Se puede usar `ip netns exec` en el host para ejecutar cualquier orden dentro
+del namespace.  En el siguiente ejemplo, creamos un network NS, listamos el
+archivo que lo referencia, listamos sus interfaces desde el namespace y lo
+eliminamos:
+
+[source,console]
+----
+# ip netns add blas
+# ls -l /run/netns/blas
+-r--r--r-- 1 root root 0 may 23 10:21 /run/netns/blas
+# ip netns exec blas ip -br link
+lo               DOWN           00:00:00:00:00:00 <LOOPBACK>
+# ip netns delete blas
+# ls -al /var/run/netns
+total 0
+drwxr-xr-x  2 root root   40 may 23 10:21 .
+drwxr-xr-x 47 root root 1400 may 23 10:13 ..
+----
+
+Se puede hacer que la orden `ip` trabaje directamente sobre un namespace con la
+opción `-n`.
+
+Aunque se borre el bind mount, los network NS perviven mientras haya procesos
+asignados a él.
+
+Por defecto, los network NS tienen una única interfaz de loopback `lo` en
+estado _DOWN_ (como puede verse en el ejemplo anterior).  Otra forma de
+comprobar esto:
+
+[source,console]
+----
+# unshare -n bash
+# ip link
+1: lo: <LOOPBACK> mtu 65536 qdisc noop state DOWN mode DEFAULT group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+# exit
+exit
+----
+
+Las interfaces de red solo pueden pertenecer a un network NS.  Cuando el
+namespace se destruye, la interfaz vuelve al namespace del que venía.  Se puede
+cambiar el network NS de una interfaz con `ip link set <if> netns <ns>`:
+
+[source,console]
+----
+# ip netns add nns                  # Creamos el network NS nss.
+# ip -n nns link                    # Solo tiene la interfaz lo en estado DOWN.
+1: lo: <LOOPBACK> mtu 65536 qdisc noop state DOWN mode DEFAULT group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+# ip link show eth0                 # eth0 está en el namespace raíz.
+2: eth0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc fq_codel state DOWN mode DEFAULT group default qlen 1000
+    link/ether bb:bb:bb:bb:5b:7a brd ff:ff:ff:ff:ff:ff
+    altname enp0s25
+# ip link set eth0 netns nns        # Movemos eth0 al namespace nss.
+# ip link show eth0                 # eth0 ya no está en el NS raíz...
+Device "eth0" does not exist.
+# ip -n nns link                    # Sino en nss.
+1: lo: <LOOPBACK> mtu 65536 qdisc noop state DOWN mode DEFAULT group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+2: eth0: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN mode DEFAULT group default qlen 1000
+    link/ether bb:bb:bb:bb:5b:7a brd ff:ff:ff:ff:ff:ff
+    altname enp0s25
+# ip netns delete nns               # Borramos el namespace...
+# ip link show eth0                 # y eth0 vuelve al espacio raíz.
+2: eth0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc fq_codel state DOWN mode DEFAULT group default qlen 1000
+    link/ether bb:bb:bb:bb:5b:7a brd ff:ff:ff:ff:ff:ff
+    altname enp0s25
+----
+
+Para permitir comunicaciones entre los procesos que estén en network NS
+distintos, se pueden utilizar interfaces virtuales tipo `veth`, que son punto a
+punto y se crean por parejas, y asignar cada una de las interfaces en un
+namespace distinto:
+
+[source,console]
+----
+# ip netns add nns1
+# ip netns add nns2
+# ip netns
+nns2 (id: 1)
+nns1 (id: 0)
+# ip link add veth0 type veth peer name veth1
+# ip link show dev veth0
+8: veth0@veth1: <BROADCAST,MULTICAST,M-DOWN> mtu 1500 qdisc noop state DOWN mode DEFAULT group default qlen 1000
+    link/ether ae:f1:eb:8d:37:9b brd ff:ff:ff:ff:ff:ff
+# ip link show dev veth1
+7: veth1@veth0: <BROADCAST,MULTICAST,M-DOWN> mtu 1500 qdisc noop state DOWN mode DEFAULT group default qlen 1000
+    link/ether 66:e7:67:f3:62:b1 brd ff:ff:ff:ff:ff:ff
+# ip link set veth0 netns ns1
+# ip link set veth1 netns ns2
+# ip netns exec nns2 bash   # Ejecutamos una shell en nns2. Alternativa: nsenter --net=/var/run/netns/nns2 bash
+# ip link                   # La MAC es la misma que en el NS raíz.
+1: lo: <LOOPBACK> mtu 65536 qdisc noop state DOWN mode DEFAULT group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+7: veth1@if8: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN mode DEFAULT group default qlen 1000
+    link/ether 66:e7:67:f3:62:b1 brd ff:ff:ff:ff:ff:ff link-netns nns1
+----
+
+Podemos aplicar NAT y filtrar el tráfico en los distintos namespaces como
+siempre.
+
+Para permitir las comunicaciones entre el host y el namespace con este tipo de
+interfaces, podríamos haber dejado una de las interfaces en el host y la otra
+en el namespace.  También podemos utilizar las interfaces de tipo `bridge`
+combinadas con las `veth` para permitir las comunicaciones entre varios
+namespaces a la vez o entre los namespaces y el host:
+
+[source,console]
+----
+# ip netns add nns1
+# ip netns add nns2
+# ip link add beth1 type veth peer name veth1
+# ip link set veth1 netns nns1
+# ip -n nns1 addr add 10.1.1.11/24 dev veth1
+# ip -n nns1 link set veth1 up
+# ip -n nns1 link set lo up     # Sin esto no podemos hacer ping 10.1.1.11 en nns1.
+# ip link add beth2 type veth peer name veth2
+# ip link set veth2 netns nns2
+# ip -n nns2 addr add 10.1.1.12/24 dev veth2
+# ip -n nns2 link set veth2 up
+# ip -n nns2 link set lo up
+# ip link add name br1 type bridge
+# ip link set br1 up
+# ip link set beth1 master br1
+# ip link set beth1 up
+# ip link set beth2 master br1
+# ip link set beth2 up                    # Ya hay comunicación entre nns1 y nns2.
+
+# ip addr add 10.1.1.1/24 brd + dev br1   # Ponemos IP y broadcast al bridge para
+# ip link set br1 up                      # permitir comunicación con el host.
+----
+
+NOTE: Si usamos el PID de un proceso con el parámetro `netns` de la orden `ip`,
+se utilizará el network NS del proceso correspondiente.
+
+=== IPC namespaces
+
+Estos namespaces aíslan los recursos de comunicación entre procesos, como
+semáforos, memoria compartida y colas, tanto los de System V como los de POSIX.
+Lo siguiente es un ejemplo para los de System V:
+
+[source,console]
+----
+host# ipcs
+
+------ Message Queues --------
+key        msqid      owner      perms      used-bytes   messages
+
+------ Shared Memory Segments --------
+key        shmid      owner      perms      bytes      nattch     status
+0x00000000 1048581    blas       600        40960      2          dest
+0x00000000 1048582    blas       600        40960      2          dest
+0x00000000 1048585    blas       600        36864      2          dest
+0x00000000 1048586    blas       600        36864      2          dest
+0x00000000 1048587    blas       600        28672      2          dest
+0x00000000 1048588    blas       600        28672      2          dest
+0x00000000 1048589    blas       600        45056      2          dest
+0x00000000 1048590    blas       600        45056      2          dest
+0x00000000 1048606    blas       600        32768      2          dest
+0x00000000 1048607    blas       600        32768      2          dest
+0x00000000 1015845    blas       600        524288     2          dest
+0x00000000 1048631    blas       600        303104     2          dest
+0x00000000 1048632    blas       600        303104     2          dest
+
+------ Semaphore Arrays --------
+key        semid      owner      perms      nsems
+0x00105b6b 2          root       600        1
+0x00105b6c 3          root       666        2
+
+host# unshare -i bash
+ns# ipcs              # En el NS recién creado no hay ningún recurso IPC SysV.
+
+------ Message Queues --------
+key        msqid      owner      perms      used-bytes   messages
+
+------ Shared Memory Segments --------
+key        shmid      owner      perms      bytes      nattch     status
+
+------ Semaphore Arrays --------
+key        semid      owner      perms      nsems
+----
+
+=== cgroup namespaces
+
+Sirven para aislar los recursos asignados a los procesos mediante cgroups,
+proporcionándoles una raíz propia.
+
+Cuando un proceso crea un nuevo cgroup NS, los directorios cgroups versiones 1
+y 2 del proceso se convierten en los directorios cgroup raíz en el nuevo NS.
+
+=== time namespaces
+
+Estos namespaces permiten dar a los procesos una visión diferente de dos de los
+relojes del sistema, `CLOCK_MONOTONIC` (el tiempo desde que arrancó el sistema,
+sin incluir los tiempos en los que se ha suspendido), y `CLOCK_BOOTTIME` (lo
+mismo, pero añadiendo el tiempo en el que el sistema ha estado suspendido).  La
+página de manual `clock_gettime(2)` tiene información sobre estos relojes.
+
+Se puede configurar la diferencia respecto al time NS inicial escribiendo en el
+pseudoarchivo `/proc/<PID>/timens_offsets`.  El contenido de ese archivo se
+puede manipular con las opciones `--monotonic` y `--boottime` de `unshare`:
+
+[source,console]
+----
+host# cat /proc/self/timens_offsets
+monotonic           0         0
+boottime            0         0
+host# uptime
+ 18:01:38 up 18 days,  4:37, 11 users,  load average: 1,80, 1,25, 1,06
+host# unshare --time --boottime=-25000 --monotonic=-25000 bash
+ns# uptime
+ 18:01:42 up 17 days, 21:40, 11 users,  load average: 1,66, 1,23, 1,05
+ns# exit
+exit
+host#
+----
+
+== Referencias
+
+* `man 5 namespaces`.
+
+* https://man7.org/conf/ndcsecurity2022/containers_as_an_illusion-NDC-Security-2022-Kerrisk.pdf[Containers as an illusion].
+
+* https://lwn.net/Articles/766124/[Artículos en LWN sobre namespaces].
+
+* https://blog.quarkslab.com/digging-into-linux-namespaces-part-1.html[Digging
+  into Linux namespaces], especialmente el
+  https://blog.quarkslab.com/digging-into-linux-namespaces-part-2.html[ejemplo
+  final].
+
+* https://github.com/jdukes/pykeyctl/blob/master/docs/Overview.org[Introducción
+  a keyrings en el kernel de Linux], `keyrings(7)` y `keyctl(1)`.
+
+* http://ifeanyi.co/posts/linux-namespaces-part-1/[A deep dive into Linux
+  namespaces].
